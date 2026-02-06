@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import OnboardingShell from "@/components/OnboardingShell";
 import { supabase } from "@/lib/supabaseClient";
@@ -8,6 +8,8 @@ import { supabase } from "@/lib/supabaseClient";
 const TOTAL = 6;
 
 type BusinessType = "barbershop" | "beauty" | "mixed";
+type StoreIdRow = { id: string };
+type Staff = { id: string; name: string; email: string | null };
 
 function slugify(input: string) {
   return input
@@ -28,11 +30,11 @@ export default function OnboardingClient() {
     return Math.min(TOTAL, Math.max(1, raw));
   }, [sp]);
 
+  // Step 1 (Loja)
   const [storeName, setStoreName] = useState("");
   const [businessType, setBusinessType] = useState<BusinessType>("barbershop");
   const [city, setCity] = useState("");
   const [slug, setSlug] = useState("");
-
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -65,14 +67,15 @@ export default function OnboardingClient() {
       return;
     }
 
-    const { error } = await supabase.from("stores").upsert({
+    const { error } = await supabase.from("stores").upsert(
+      {
         owner_id: user.id,
         name,
         business_type: businessType,
         city: cityClean || null,
         slug: finalSlug,
       },
-        { onConflict: "owner_id" }
+      { onConflict: "owner_id" }
     );
 
     setSaving(false);
@@ -91,6 +94,193 @@ export default function OnboardingClient() {
     router.push("/onboarding?step=2");
   }
 
+  // Step 2 (Profissionais)
+  function Step2Staff() {
+    const [loading, setLoading] = useState(true);
+    const [storeId, setStoreId] = useState<string | null>(null);
+    const [items, setItems] = useState<Staff[]>([]);
+    const [name, setName] = useState("");
+    const [email, setEmail] = useState("");
+    const [stepError, setStepError] = useState<string | null>(null);
+    const [adding, setAdding] = useState(false);
+
+    async function load() {
+      setStepError(null);
+      setLoading(true);
+
+      const { data: authData, error: authErr } = await supabase.auth.getUser();
+      const user = authData?.user;
+
+      if (authErr || !user) {
+        setLoading(false);
+        router.push("/login");
+        return;
+      }
+
+      const { data: store, error: storeErr } = await supabase
+        .from("stores")
+        .select("id")
+        .eq("owner_id", user.id)
+        .maybeSingle<StoreIdRow>();
+
+      if (storeErr || !store) {
+        setLoading(false);
+        setStepError("Não foi encontrada uma loja. Volte ao Step 1.");
+        return;
+      }
+
+      setStoreId(store.id);
+
+      const { data: staff, error: staffErr } = await supabase
+        .from("staff")
+        .select("id,name,email")
+        .eq("store_id", store.id)
+        .order("created_at", { ascending: true });
+
+      if (staffErr) {
+        setLoading(false);
+        setStepError(staffErr.message);
+        return;
+      }
+
+      setItems((staff ?? []) as Staff[]);
+      setLoading(false);
+    }
+
+    async function addStaff() {
+      setStepError(null);
+
+      const n = name.trim();
+      const e = email.trim();
+
+      if (!storeId) return;
+      if (!n) {
+        setStepError("Indique o nome do profissional.");
+        return;
+      }
+
+      setAdding(true);
+
+      const { error } = await supabase.from("staff").insert({
+        store_id: storeId,
+        name: n,
+        email: e || null,
+      });
+
+      setAdding(false);
+
+      if (error) {
+        setStepError(error.message);
+        return;
+      }
+
+      setName("");
+      setEmail("");
+      await load();
+    }
+
+    async function removeStaff(id: string) {
+      setStepError(null);
+      const { error } = await supabase.from("staff").delete().eq("id", id);
+      if (error) {
+        setStepError(error.message);
+        return;
+      }
+      setItems((prev) => prev.filter((x) => x.id !== id));
+    }
+
+    useEffect(() => {
+      load();
+    }, []);
+
+    return (
+      <OnboardingShell
+        step={2}
+        total={TOTAL}
+        title="Profissionais"
+        subtitle="Adicione os profissionais da sua loja."
+        backHref="/onboarding?step=1"
+        nextHref="/onboarding?step=3"
+      >
+        {loading ? (
+          <div className="rounded-xl border border-gray-200 p-4 text-sm text-gray-700">
+            A carregar...
+          </div>
+        ) : (
+          <>
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="block">
+                <span className="text-sm font-medium text-gray-700">Nome</span>
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="ex: João Silva"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-gray-300 focus:ring-4 focus:ring-gray-100"
+                />
+              </label>
+
+              <label className="block">
+                <span className="text-sm font-medium text-gray-700">Email (opcional)</span>
+                <input
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="ex: joao@email.pt"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-gray-300 focus:ring-4 focus:ring-gray-100"
+                />
+              </label>
+            </div>
+
+            {stepError ? (
+              <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {stepError}
+              </div>
+            ) : null}
+
+            <div className="mt-4">
+              <button
+                onClick={addStaff}
+                disabled={adding}
+                className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:opacity-90 disabled:opacity-60 focus:outline-none focus:ring-4 focus:ring-gray-200"
+              >
+                {adding ? "A adicionar..." : "Adicionar profissional"}
+              </button>
+            </div>
+
+            <div className="mt-6">
+              <div className="text-sm font-semibold text-gray-900">Equipa</div>
+              <div className="mt-3 space-y-2">
+                {items.length === 0 ? (
+                  <div className="rounded-xl border border-gray-200 p-4 text-sm text-gray-700">
+                    Ainda não adicionou profissionais.
+                  </div>
+                ) : (
+                  items.map((p) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center justify-between rounded-xl border border-gray-200 bg-white px-4 py-3"
+                    >
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900">{p.name}</div>
+                        <div className="text-xs text-gray-500">{p.email ?? "Sem email"}</div>
+                      </div>
+                      <button
+                        onClick={() => removeStaff(p.id)}
+                        className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
+                      >
+                        Remover
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </OnboardingShell>
+    );
+  }
+
+  // Render por step
   if (step === 1) {
     return (
       <OnboardingShell
@@ -184,20 +374,7 @@ export default function OnboardingClient() {
   }
 
   if (step === 2) {
-    return (
-      <OnboardingShell
-        step={2}
-        total={TOTAL}
-        title="Profissionais"
-        subtitle="Adicione os profissionais."
-        backHref="/onboarding?step=1"
-        nextHref="/onboarding?step=3"
-      >
-        <div className="rounded-xl border border-gray-200 p-4 text-sm text-gray-700">
-          (Placeholder) Lista de profissionais + “Adicionar”.
-        </div>
-      </OnboardingShell>
-    );
+    return <Step2Staff />;
   }
 
   if (step === 3) {
