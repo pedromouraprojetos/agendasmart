@@ -65,13 +65,15 @@ export default function OnboardingClient() {
       return;
     }
 
-    const { error } = await supabase.from("stores").insert({
-      owner_id: user.id,
-      name,
-      business_type: businessType,
-      city: cityClean || null,
-      slug: finalSlug,
-    });
+    const { error } = await supabase.from("stores").upsert({
+        owner_id: user.id,
+        name,
+        business_type: businessType,
+        city: cityClean || null,
+        slug: finalSlug,
+      },
+        { onConflict: "owner_id" }
+    );
 
     setSaving(false);
 
