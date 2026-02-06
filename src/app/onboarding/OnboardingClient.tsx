@@ -10,6 +10,13 @@ const TOTAL = 6;
 type BusinessType = "barbershop" | "beauty" | "mixed";
 type StoreIdRow = { id: string };
 type Staff = { id: string; name: string; email: string | null };
+type Service = {
+  id: string;
+  name: string;
+  price_cents: number;
+  duration_minutes: number;
+};
+
 
 function slugify(input: string) {
   return input
@@ -280,6 +287,204 @@ export default function OnboardingClient() {
     );
   }
 
+  function Step3Services() {
+    const router = useRouter();
+
+    const [loading, setLoading] = useState(true);
+    const [storeId, setStoreId] = useState<string | null>(null);
+
+    const [items, setItems] = useState<Service[]>([]);
+    const [name, setName] = useState("");
+    const [priceEuros, setPriceEuros] = useState("15");
+    const [duration, setDuration] = useState("30");
+
+    const [errorMsg, setErrorMsg] = useState<string | null>(null);
+    const [saving, setSaving] = useState(false);
+
+    async function load() {
+      setErrorMsg(null);
+      setLoading(true);
+
+      const { data: authData, error: authErr } = await supabase.auth.getUser();
+      const user = authData?.user;
+
+      if (authErr || !user) {
+        setLoading(false);
+        router.push("/login");
+        return;
+      }
+
+      const { data: store, error: storeErr } = await supabase
+        .from("stores")
+        .select("id")
+        .eq("owner_id", user.id)
+        .maybeSingle<{ id: string }>();
+
+      if (storeErr || !store) {
+        setLoading(false);
+        setErrorMsg("Não foi encontrada uma loja. Volte ao Step 1.");
+        return;
+      }
+
+      setStoreId(store.id);
+
+      const { data: services, error: servicesErr } = await supabase
+        .from("services")
+        .select("id,name,price_cents,duration_minutes")
+        .eq("store_id", store.id)
+        .order("created_at", { ascending: true });
+
+      if (servicesErr) {
+        setLoading(false);
+        setErrorMsg(servicesErr.message);
+        return;
+      }
+
+      setItems((services ?? []) as Service[]);
+      setLoading(false);
+    }
+
+    async function addService() {
+      setErrorMsg(null);
+
+      if (!storeId) return;
+
+      const n = name.trim();
+      const euros = Number(priceEuros.replace(",", "."));
+      const mins = Number(duration);
+
+      if (!n) return setErrorMsg("Indique o nome do serviço.");
+      if (!Number.isFinite(euros) || euros < 0) return setErrorMsg("Preço inválido.");
+      if (!Number.isFinite(mins) || mins <= 0) return setErrorMsg("Duração inválida.");
+
+      const price_cents = Math.round(euros * 100);
+
+      setSaving(true);
+
+      const { error } = await supabase.from("services").insert({
+        store_id: storeId,
+        name: n,
+        price_cents,
+        duration_minutes: mins,
+      });
+
+      setSaving(false);
+
+      if (error) return setErrorMsg(error.message);
+
+      setName("");
+      await load();
+    }
+
+    async function removeService(id: string) {
+      setErrorMsg(null);
+      const { error } = await supabase.from("services").delete().eq("id", id);
+      if (error) return setErrorMsg(error.message);
+      setItems((prev) => prev.filter((x) => x.id !== id));
+    }
+
+    useEffect(() => {
+      load();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    return (
+      <OnboardingShell
+        step={3}
+        total={TOTAL}
+        title="Serviços"
+        subtitle="Defina preço e duração dos serviços."
+        backHref="/onboarding?step=2"
+        nextHref="/onboarding?step=4"
+      >
+        {loading ? (
+          <div className="rounded-xl border border-gray-200 p-4 text-sm text-gray-700">A carregar...</div>
+        ) : (
+          <>
+            <div className="grid gap-3 md:grid-cols-3">
+              <label className="block md:col-span-1">
+                <span className="text-sm font-medium text-gray-700">Serviço</span>
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="ex: Corte de cabelo"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-gray-300 focus:ring-4 focus:ring-gray-100"
+                />
+              </label>
+
+              <label className="block md:col-span-1">
+                <span className="text-sm font-medium text-gray-700">Preço (€)</span>
+                <input
+                  value={priceEuros}
+                  onChange={(e) => setPriceEuros(e.target.value)}
+                  placeholder="ex: 15"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-gray-300 focus:ring-4 focus:ring-gray-100"
+                />
+              </label>
+
+              <label className="block md:col-span-1">
+                <span className="text-sm font-medium text-gray-700">Duração (min)</span>
+                <input
+                  value={duration}
+                  onChange={(e) => setDuration(e.target.value)}
+                  placeholder="ex: 30"
+                  className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-gray-300 focus:ring-4 focus:ring-gray-100"
+                />
+              </label>
+            </div>
+
+            {errorMsg ? (
+              <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {errorMsg}
+              </div>
+            ) : null}
+
+            <div className="mt-4">
+              <button
+                onClick={addService}
+                disabled={saving}
+                className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:opacity-90 disabled:opacity-60 focus:outline-none focus:ring-4 focus:ring-gray-200"
+              >
+                {saving ? "A adicionar..." : "Adicionar serviço"}
+              </button>
+            </div>
+
+            <div className="mt-6">
+              <div className="text-sm font-semibold text-gray-900">Serviços</div>
+              <div className="mt-3 space-y-2">
+                {items.length === 0 ? (
+                  <div className="rounded-xl border border-gray-200 p-4 text-sm text-gray-700">
+                    Ainda não adicionou serviços.
+                  </div>
+                ) : (
+                  items.map((s) => (
+                    <div
+                      key={s.id}
+                      className="flex items-center justify-between rounded-xl border border-gray-200 bg-white px-4 py-3"
+                    >
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900">{s.name}</div>
+                        <div className="text-xs text-gray-500">
+                          {(s.price_cents / 100).toFixed(2)}€ · {s.duration_minutes} min
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => removeService(s.id)}
+                        className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
+                      >
+                        Remover
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </OnboardingShell>
+    );
+  }
+
   // Render por step
   if (step === 1) {
     return (
@@ -378,20 +583,7 @@ export default function OnboardingClient() {
   }
 
   if (step === 3) {
-    return (
-      <OnboardingShell
-        step={3}
-        total={TOTAL}
-        title="Serviços"
-        subtitle="Defina preço e duração."
-        backHref="/onboarding?step=2"
-        nextHref="/onboarding?step=4"
-      >
-        <div className="rounded-xl border border-gray-200 p-4 text-sm text-gray-700">
-          (Placeholder) Lista de serviços + associar profissionais.
-        </div>
-      </OnboardingShell>
-    );
+    return <Step3Services />;
   }
 
   if (step === 4) {
