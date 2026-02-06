@@ -17,6 +17,17 @@ type Service = {
   duration_minutes: number;
 };
 
+// ✅ Opção A: 2 blocos por dia (manhã/tarde)
+type WorkingHourSlot = 1 | 2;
+type WorkingHour = {
+  id?: string;
+  staff_id: string;
+  day_of_week: number;
+  slot: WorkingHourSlot; // 1=manhã, 2=tarde
+  is_open: boolean;
+  start_time: string;
+  end_time: string;
+};
 
 function slugify(input: string) {
   return input
@@ -385,7 +396,6 @@ export default function OnboardingClient() {
 
     useEffect(() => {
       load();
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     return (
@@ -485,6 +495,458 @@ export default function OnboardingClient() {
     );
   }
 
+  // ✅ ALTERADO: Step 4 com Manhã (slot=1) e Tarde (slot=2)
+  function Step4Hours() {
+    const router = useRouter();
+
+    const days = [
+      { id: 1, label: "Segunda" },
+      { id: 2, label: "Terça" },
+      { id: 3, label: "Quarta" },
+      { id: 4, label: "Quinta" },
+      { id: 5, label: "Sexta" },
+      { id: 6, label: "Sábado" },
+      { id: 0, label: "Domingo" },
+    ];
+
+    type WorkingHourSlot = 1 | 2;
+    type WorkingHour = {
+      id?: string;
+      staff_id: string;
+      day_of_week: number;
+      slot: WorkingHourSlot; // 1=manhã, 2=tarde
+      is_open: boolean;
+      start_time: string; // "HH:MM" (vamos garantir)
+      end_time: string;   // "HH:MM" (vamos garantir)
+    };
+
+    const [loading, setLoading] = useState(true);
+    const [storeId, setStoreId] = useState<string | null>(null);
+
+    const [staffList, setStaffList] = useState<Staff[]>([]);
+    const [staffId, setStaffId] = useState<string>("");
+
+    const [rows, setRows] = useState<WorkingHour[]>([]);
+    const [errorMsg, setErrorMsg] = useState<string | null>(null);
+    const [saving, setSaving] = useState(false);
+
+    const hhmm = (t: string | null | undefined) => {
+      const s = (t ?? "").trim();
+      if (!s) return "";
+      // "18:00:00" -> "18:00"
+      return s.length >= 5 ? s.slice(0, 5) : s;
+    };
+
+    function defaultRows(forStaffId: string): WorkingHour[] {
+      const result: WorkingHour[] = [];
+      for (const d of days) {
+        const openDefault = d.id >= 1 && d.id <= 5; // seg-sex
+
+        result.push({
+          staff_id: forStaffId,
+          day_of_week: d.id,
+          slot: 1,
+          is_open: openDefault,
+          start_time: "09:00",
+          end_time: "13:00",
+        });
+
+        result.push({
+          staff_id: forStaffId,
+          day_of_week: d.id,
+          slot: 2,
+          is_open: openDefault,
+          start_time: "14:00",
+          end_time: "18:00",
+        });
+      }
+      return result;
+    }
+
+    function normalizeLegacyRows(list: WorkingHour[]): WorkingHour[] {
+      return list.map((r) => {
+        const start = hhmm(r.start_time);
+        const end = hhmm(r.end_time);
+
+        // força formato HH:MM sempre
+        let fixed: WorkingHour = { ...r, start_time: start, end_time: end };
+
+        // caso legado: 09:00-18:00 na manhã
+        if (fixed.slot === 1 && start === "09:00" && end === "18:00") {
+          fixed = { ...fixed, end_time: "13:00" };
+        }
+
+        // caso legado: tarde com 09:00-18:00
+        if (fixed.slot === 2 && start === "09:00" && end === "18:00") {
+          fixed = { ...fixed, start_time: "14:00" };
+        }
+
+        return fixed;
+      });
+    }
+
+    async function load() {
+      setErrorMsg(null);
+      setLoading(true);
+
+      const { data: authData, error: authErr } = await supabase.auth.getUser();
+      const user = authData?.user;
+
+      if (authErr || !user) {
+        setLoading(false);
+        router.push("/login");
+        return;
+      }
+
+      const { data: store, error: storeErr } = await supabase
+        .from("stores")
+        .select("id")
+        .eq("owner_id", user.id)
+        .maybeSingle<{ id: string }>();
+
+      if (storeErr || !store) {
+        setLoading(false);
+        setErrorMsg("Não foi encontrada uma loja. Volte ao Step 1.");
+        return;
+      }
+      setStoreId(store.id);
+
+      const { data: staff, error: staffErr } = await supabase
+        .from("staff")
+        .select("id,name,email")
+        .eq("store_id", store.id)
+        .order("created_at", { ascending: true });
+
+      if (staffErr) {
+        setLoading(false);
+        setErrorMsg(staffErr.message);
+        return;
+      }
+
+      const list = (staff ?? []) as Staff[];
+      setStaffList(list);
+
+      const first = list[0]?.id ?? "";
+      setStaffId(first);
+
+      if (first) {
+        await loadHours(store.id, first);
+      } else {
+        setRows([]);
+      }
+
+      setLoading(false);
+    }
+
+    async function loadHours(sid: string, sStaffId: string) {
+      setErrorMsg(null);
+
+      const { data: hours, error } = await supabase
+        .from("staff_working_hours")
+        .select("id,staff_id,day_of_week,slot,is_open,start_time,end_time")
+        .eq("store_id", sid)
+        .eq("staff_id", sStaffId);
+
+      if (error) {
+        setErrorMsg(error.message);
+        setRows(defaultRows(sStaffId));
+        return;
+      }
+
+      const mappedRaw = (hours ?? []) as WorkingHour[];
+
+      if (mappedRaw.length === 0) {
+        setRows(defaultRows(sStaffId));
+        return;
+      }
+
+      const mapped = normalizeLegacyRows(mappedRaw);
+
+      const key = (day: number, slot: WorkingHourSlot) => `${day}-${slot}`;
+      const byKey = new Map<string, WorkingHour>();
+      for (const h of mapped) byKey.set(key(h.day_of_week, h.slot), h);
+
+      const fallbackAll = defaultRows(sStaffId);
+
+      const merged: WorkingHour[] = [];
+      for (const d of days) {
+        for (const slot of [1, 2] as WorkingHourSlot[]) {
+          const existing = byKey.get(key(d.id, slot));
+          if (existing) merged.push(existing);
+          else {
+            const fb = fallbackAll.find((x) => x.day_of_week === d.id && x.slot === slot);
+            merged.push(
+              fb ?? {
+                staff_id: sStaffId,
+                day_of_week: d.id,
+                slot,
+                is_open: d.id >= 1 && d.id <= 5,
+                start_time: slot === 1 ? "09:00" : "14:00",
+                end_time: slot === 1 ? "13:00" : "18:00",
+              }
+            );
+          }
+        }
+      }
+
+      setRows(normalizeLegacyRows(merged));
+    }
+
+    function updateRow(day: number, slot: WorkingHourSlot, patch: Partial<WorkingHour>) {
+      setRows((prev) =>
+        prev.map((r) =>
+          r.day_of_week === day && r.slot === slot
+            ? {
+                ...r,
+                ...patch,
+                ...(patch.start_time ? { start_time: hhmm(patch.start_time) } : null),
+                ...(patch.end_time ? { end_time: hhmm(patch.end_time) } : null),
+              }
+            : r
+        )
+      );
+    }
+
+    async function saveAll() {
+      setErrorMsg(null);
+      if (!storeId || !staffId) return;
+
+      // validação por slot
+      for (const r of rows) {
+        if (!r.is_open) continue;
+        if (!r.start_time || !r.end_time) {
+          setErrorMsg("Horas inválidas. Preencha início e fim.");
+          return;
+        }
+        if (hhmm(r.start_time) >= hhmm(r.end_time)) {
+          setErrorMsg("Hora de início tem de ser antes da hora de fim.");
+          return;
+        }
+      }
+
+      // validação extra: manhã não pode sobrepor a tarde
+      for (const d of days) {
+        const m = rows.find((x) => x.day_of_week === d.id && x.slot === 1);
+        const a = rows.find((x) => x.day_of_week === d.id && x.slot === 2);
+
+        if (m?.is_open && a?.is_open) {
+          if (hhmm(m.end_time) > hhmm(a.start_time)) {
+            setErrorMsg(`No dia ${d.label}, a manhã tem de terminar antes da tarde começar.`);
+            return;
+          }
+        }
+      }
+
+      setSaving(true);
+
+      const payload = rows.map((r) => ({
+        store_id: storeId,
+        staff_id: staffId,
+        day_of_week: r.day_of_week,
+        slot: r.slot,
+        is_open: r.is_open,
+        start_time: hhmm(r.start_time),
+        end_time: hhmm(r.end_time),
+      }));
+
+      const { error } = await supabase
+        .from("staff_working_hours")
+        .upsert(payload, { onConflict: "staff_id,day_of_week,slot" });
+
+      setSaving(false);
+
+      if (error) {
+        setErrorMsg(error.message);
+        return;
+      }
+
+      await loadHours(storeId, staffId);
+    }
+
+    async function onChangeStaff(newStaffId: string) {
+      setStaffId(newStaffId);
+      if (storeId && newStaffId) await loadHours(storeId, newStaffId);
+    }
+
+    useEffect(() => {
+      load();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    return (
+      <OnboardingShell
+        step={4}
+        total={TOTAL}
+        title="Horários"
+        subtitle="Defina o horário semanal (manhã e tarde) de cada profissional."
+        backHref="/onboarding?step=3"
+        nextHref="/onboarding?step=5"
+      >
+        {loading ? (
+          <div className="rounded-xl border border-gray-200 p-4 text-sm text-gray-700">A carregar...</div>
+        ) : staffList.length === 0 ? (
+          <div className="rounded-xl border border-gray-200 p-4 text-sm text-gray-700">
+            Ainda não tem profissionais. Volte ao Step 2 e adicione pelo menos 1.
+          </div>
+        ) : (
+          <>
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">Profissional</span>
+              <select
+                value={staffId}
+                onChange={(e) => onChangeStaff(e.target.value)}
+                className="mt-2 w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none focus:ring-4 focus:ring-gray-100"
+              >
+                {staffList.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="mt-6 space-y-3">
+              {days.map((d) => {
+                const morning = rows.find((x) => x.day_of_week === d.id && x.slot === 1);
+                const afternoon = rows.find((x) => x.day_of_week === d.id && x.slot === 2);
+
+                const mOpen = morning?.is_open ?? false;
+                const aOpen = afternoon?.is_open ?? false;
+
+                return (
+                  <div key={d.id} className="rounded-2xl border border-gray-200 bg-white p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-semibold text-gray-900">{d.label}</div>
+
+                      <div className="flex items-center gap-3 text-xs text-gray-600">
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={mOpen}
+                            onChange={(e) => updateRow(d.id, 1, { is_open: e.target.checked })}
+                            className="h-4 w-4"
+                          />
+                          Manhã
+                        </label>
+
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={aOpen}
+                            onChange={(e) => updateRow(d.id, 2, { is_open: e.target.checked })}
+                            className="h-4 w-4"
+                          />
+                          Tarde
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      {/* Manhã */}
+                      <div
+                        className={[
+                          "rounded-2xl border p-3",
+                          mOpen ? "border-gray-200 bg-white" : "border-gray-100 bg-gray-50",
+                        ].join(" ")}
+                      >
+                        <div className="mb-2 flex items-center justify-between">
+                          <div className="text-xs font-semibold text-gray-800">Manhã</div>
+                          <div className="text-[11px] text-gray-500">Ex: 09:00–13:00</div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <label className="block">
+                            <span className="text-xs text-gray-600">Início</span>
+                            <input
+                              type="time"
+                              value={hhmm(morning?.start_time) || "09:00"}
+                              disabled={!mOpen}
+                              onChange={(e) => updateRow(d.id, 1, { start_time: e.target.value })}
+                              className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none disabled:bg-gray-100"
+                            />
+                          </label>
+
+                          <label className="block">
+                            <span className="text-xs text-gray-600">Fim</span>
+                            <input
+                              type="time"
+                              value={hhmm(morning?.end_time) || "13:00"}
+                              disabled={!mOpen}
+                              onChange={(e) => updateRow(d.id, 1, { end_time: e.target.value })}
+                              className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none disabled:bg-gray-100"
+                            />
+                          </label>
+                        </div>
+
+                        {!mOpen ? <div className="mt-2 text-xs text-gray-500">Fechado de manhã</div> : null}
+                      </div>
+
+                      {/* Tarde */}
+                      <div
+                        className={[
+                          "rounded-2xl border p-3",
+                          aOpen ? "border-gray-200 bg-white" : "border-gray-100 bg-gray-50",
+                        ].join(" ")}
+                      >
+                        <div className="mb-2 flex items-center justify-between">
+                          <div className="text-xs font-semibold text-gray-800">Tarde</div>
+                          <div className="text-[11px] text-gray-500">Ex: 14:00–18:00</div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <label className="block">
+                            <span className="text-xs text-gray-600">Início</span>
+                            <input
+                              type="time"
+                              value={hhmm(afternoon?.start_time) || "14:00"}
+                              disabled={!aOpen}
+                              onChange={(e) => updateRow(d.id, 2, { start_time: e.target.value })}
+                              className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none disabled:bg-gray-100"
+                            />
+                          </label>
+
+                          <label className="block">
+                            <span className="text-xs text-gray-600">Fim</span>
+                            <input
+                              type="time"
+                              value={hhmm(afternoon?.end_time) || "18:00"}
+                              disabled={!aOpen}
+                              onChange={(e) => updateRow(d.id, 2, { end_time: e.target.value })}
+                              className="mt-1 w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm outline-none disabled:bg-gray-100"
+                            />
+                          </label>
+                        </div>
+
+                        {!aOpen ? <div className="mt-2 text-xs text-gray-500">Fechado à tarde</div> : null}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {errorMsg ? (
+              <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {errorMsg}
+              </div>
+            ) : null}
+
+            <div className="mt-4">
+              <button
+                onClick={saveAll}
+                disabled={saving}
+                className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:opacity-90 disabled:opacity-60 focus:outline-none focus:ring-4 focus:ring-gray-200"
+              >
+                {saving ? "A guardar..." : "Guardar horários"}
+              </button>
+            </div>
+          </>
+        )}
+      </OnboardingShell>
+    );
+  }
+
+
   // Render por step
   if (step === 1) {
     return (
@@ -578,30 +1040,9 @@ export default function OnboardingClient() {
     );
   }
 
-  if (step === 2) {
-    return <Step2Staff />;
-  }
-
-  if (step === 3) {
-    return <Step3Services />;
-  }
-
-  if (step === 4) {
-    return (
-      <OnboardingShell
-        step={4}
-        total={TOTAL}
-        title="Horários"
-        subtitle="Horário semanal."
-        backHref="/onboarding?step=3"
-        nextHref="/onboarding?step=5"
-      >
-        <div className="rounded-xl border border-gray-200 p-4 text-sm text-gray-700">
-          (Placeholder) Horários por profissional.
-        </div>
-      </OnboardingShell>
-    );
-  }
+  if (step === 2) return <Step2Staff />;
+  if (step === 3) return <Step3Services />;
+  if (step === 4) return <Step4Hours />;
 
   if (step === 5) {
     return (
