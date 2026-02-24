@@ -9,25 +9,28 @@ import {
   overlaps,
 } from "@/lib/tz";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 type StoreRow = { id: string };
 
 type WorkingHourRow = {
   day_of_week: number;
   slot: 1 | 2;
   is_open: boolean;
-  start_time: string;
-  end_time: string;
+  start_time: string; // "HH:MM" or "HH:MM:SS"
+  end_time: string;   // "HH:MM" or "HH:MM:SS"
 };
 
 type AppointmentRow = {
-  start_at: string;
-  end_at: string;
+  start_at: string; // ISO
+  end_at: string;   // ISO
   buffer_after_minutes_snapshot: number | null;
 };
 
 type BlockRow = {
-  start_at: string;
-  end_at: string;
+  start_at: string; // ISO
+  end_at: string;   // ISO
   staff_id: string | null;
 };
 
@@ -35,11 +38,22 @@ type Range = { start: Date; end: Date };
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
+
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-store, max-age=0",
+};
 
 function toHHMM(value: string): string {
   return value.length >= 5 ? value.slice(0, 5) : value;
+}
+
+function json<T>(data: T, status = 200) {
+  return NextResponse.json(data, {
+    status,
+    headers: NO_STORE_HEADERS,
+  });
 }
 
 export async function GET(req: NextRequest) {
@@ -55,11 +69,21 @@ export async function GET(req: NextRequest) {
     const leadMinutes = Number(searchParams.get("leadMinutes") ?? "120");
     const bufferAfter = Number(searchParams.get("bufferAfter") ?? "0");
 
-    if (!slug) return NextResponse.json({ error: "Missing slug" }, { status: 400 });
-    if (!staffId) return NextResponse.json({ error: "Missing staffId" }, { status: 400 });
-    if (!date) return NextResponse.json({ error: "Missing date (YYYY-MM-DD)" }, { status: 400 });
+    if (!slug) return json({ error: "Missing slug" }, 400);
+    if (!staffId) return json({ error: "Missing staffId" }, 400);
+    if (!date) return json({ error: "Missing date (YYYY-MM-DD)" }, 400);
+
     if (!Number.isFinite(serviceMinutes) || serviceMinutes <= 0) {
-      return NextResponse.json({ error: "Invalid serviceMinutes" }, { status: 400 });
+      return json({ error: "Invalid serviceMinutes" }, 400);
+    }
+    if (!Number.isFinite(stepMinutes) || stepMinutes <= 0) {
+      return json({ error: "Invalid stepMinutes" }, 400);
+    }
+    if (!Number.isFinite(leadMinutes) || leadMinutes < 0) {
+      return json({ error: "Invalid leadMinutes" }, 400);
+    }
+    if (!Number.isFinite(bufferAfter) || bufferAfter < 0) {
+      return json({ error: "Invalid bufferAfter" }, 400);
     }
 
     // 1) loja
@@ -69,13 +93,15 @@ export async function GET(req: NextRequest) {
       .eq("slug", slug)
       .maybeSingle<StoreRow>();
 
-    if (storeErr) return NextResponse.json({ error: storeErr.message }, { status: 500 });
-    if (!store) return NextResponse.json({ error: "Store not found" }, { status: 404 });
+    if (storeErr) return json({ error: storeErr.message }, 500);
+    if (!store) return json({ error: "Store not found" }, 404);
 
-    // 2) intervalo do dia em UTC (Lisboa) — a tua função devolve {start,end}
+    // 2) intervalo do dia em UTC (Lisboa)
+    // a tua função devolve { start, end }
     const { start: dayStartUtc, end: dayEndUtc } = lisbonDayRangeUtc(date);
 
     // dayOfWeek em Lisboa (0=Dom..6=Sáb)
+    // usar meio-dia local evita problemas de mudança de hora
     const midUtc = lisbonLocalToUtc(date, "12:00");
     const dayOfWeek = midUtc.getUTCDay();
 
@@ -87,7 +113,7 @@ export async function GET(req: NextRequest) {
       .eq("staff_id", staffId)
       .eq("day_of_week", dayOfWeek);
 
-    if (hoursErr) return NextResponse.json({ error: hoursErr.message }, { status: 500 });
+    if (hoursErr) return json({ error: hoursErr.message }, 500);
 
     const openSlots = (hours ?? [])
       .filter((h: WorkingHourRow) => h.is_open)
@@ -96,9 +122,9 @@ export async function GET(req: NextRequest) {
         end: toHHMM(h.end_time),
       }));
 
-    if (openSlots.length === 0) return NextResponse.json({ slots: [] });
+    if (openSlots.length === 0) return json({ slots: [] }, 200);
 
-    // 4) marcações do dia
+    // 4) marcações do dia (ocupado)
     const { data: appts, error: apptsErr } = await supabase
       .from("appointments")
       .select("start_at,end_at,buffer_after_minutes_snapshot")
@@ -107,7 +133,7 @@ export async function GET(req: NextRequest) {
       .gte("start_at", dayStartUtc.toISOString())
       .lt("start_at", dayEndUtc.toISOString());
 
-    if (apptsErr) return NextResponse.json({ error: apptsErr.message }, { status: 500 });
+    if (apptsErr) return json({ error: apptsErr.message }, 500);
 
     const busy: Range[] = (appts ?? []).map((a: AppointmentRow) => {
       const s = new Date(a.start_at);
@@ -125,7 +151,7 @@ export async function GET(req: NextRequest) {
       .gte("end_at", dayStartUtc.toISOString())
       .lte("start_at", dayEndUtc.toISOString());
 
-    if (blocksErr) return NextResponse.json({ error: blocksErr.message }, { status: 500 });
+    if (blocksErr) return json({ error: blocksErr.message }, 500);
 
     const blocked: Range[] = (blocksDb ?? []).map((b: BlockRow) => ({
       start: new Date(b.start_at),
@@ -134,7 +160,9 @@ export async function GET(req: NextRequest) {
 
     // 6) gerar slots
     const occupyMinutes = serviceMinutes + bufferAfter;
-    const minStartAllowed = addMinutes(new Date(), leadMinutes);
+
+    const nowUtc = new Date();
+    const minStartAllowed = addMinutes(nowUtc, leadMinutes);
 
     const resultSlots: string[] = [];
 
@@ -149,9 +177,15 @@ export async function GET(req: NextRequest) {
         const candidateEnd = addMinutes(candidateStart, occupyMinutes);
 
         if (candidateEnd <= blockEndUtc && candidateStart >= minStartAllowed) {
-          const hitBusy = busy.some((x) => overlaps(candidateStart, candidateEnd, x.start, x.end));
+          const hitBusy = busy.some((x) =>
+            overlaps(candidateStart, candidateEnd, x.start, x.end)
+          );
+
           if (!hitBusy) {
-            const hitBlock = blocked.some((x) => overlaps(candidateStart, candidateEnd, x.start, x.end));
+            const hitBlock = blocked.some((x) =>
+              overlaps(candidateStart, candidateEnd, x.start, x.end)
+            );
+
             if (!hitBlock) {
               const hhmmLocal = new Intl.DateTimeFormat("en-GB", {
                 timeZone: STORE_TZ,
@@ -170,9 +204,10 @@ export async function GET(req: NextRequest) {
     }
 
     const unique = Array.from(new Set(resultSlots)).sort();
-    return NextResponse.json({ slots: unique });
+
+    return json({ slots: unique }, 200);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown error";
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return json({ error: msg }, 500);
   }
 }

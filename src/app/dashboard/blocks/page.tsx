@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 
 type Staff = { id: string; name: string };
@@ -12,7 +13,11 @@ type Block = {
   reason: string | null;
 };
 
+type StoreRow = { id: string };
+
 export default function BlocksPage() {
+  const router = useRouter();
+
   const [staff, setStaff] = useState<Staff[]>([]);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [storeId, setStoreId] = useState<string | null>(null);
@@ -24,16 +29,9 @@ export default function BlocksPage() {
 
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
 
-  const mountedRef = useRef(true);
-
-  const staffNameById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const s of staff) m.set(s.id, s.name);
-    return m;
-  }, [staff]);
-
-  const loadAll = useCallback(async () => {
+  async function loadAll() {
     setMsg(null);
     setLoading(true);
 
@@ -41,9 +39,8 @@ export default function BlocksPage() {
     const user = authData?.user;
 
     if (authErr || !user) {
-      if (!mountedRef.current) return;
       setLoading(false);
-      setMsg("Sessão inválida. Faça login novamente.");
+      router.push("/login");
       return;
     }
 
@@ -51,16 +48,20 @@ export default function BlocksPage() {
       .from("stores")
       .select("id")
       .eq("owner_id", user.id)
-      .maybeSingle<{ id: string }>();
+      .maybeSingle<StoreRow>();
 
-    if (storeErr || !store?.id) {
-      if (!mountedRef.current) return;
+    if (storeErr) {
       setLoading(false);
-      setMsg(storeErr?.message ?? "Loja não encontrada.");
+      setMsg(storeErr.message);
       return;
     }
 
-    if (!mountedRef.current) return;
+    if (!store?.id) {
+      setLoading(false);
+      setMsg("Loja não encontrada.");
+      return;
+    }
+
     setStoreId(store.id);
 
     const { data: staffRows, error: stErr } = await supabase
@@ -70,13 +71,11 @@ export default function BlocksPage() {
       .order("created_at", { ascending: true });
 
     if (stErr) {
-      if (!mountedRef.current) return;
       setLoading(false);
       setMsg(stErr.message);
       return;
     }
 
-    if (!mountedRef.current) return;
     setStaff((staffRows ?? []) as Staff[]);
 
     const { data: blockRows, error: bErr } = await supabase
@@ -86,16 +85,93 @@ export default function BlocksPage() {
       .order("start_at", { ascending: true });
 
     if (bErr) {
-      if (!mountedRef.current) return;
       setLoading(false);
       setMsg(bErr.message);
       return;
     }
 
-    if (!mountedRef.current) return;
     setBlocks((blockRows ?? []) as Block[]);
     setLoading(false);
-  }, []);
+  }
+
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      setMsg(null);
+      setLoading(true);
+
+      const { data: authData, error: authErr } = await supabase.auth.getUser();
+      const user = authData?.user;
+
+      if (!mounted) return;
+
+      if (authErr || !user) {
+        setLoading(false);
+        router.push("/login");
+        return;
+      }
+
+      const { data: store, error: storeErr } = await supabase
+        .from("stores")
+        .select("id")
+        .eq("owner_id", user.id)
+        .maybeSingle<StoreRow>();
+
+      if (!mounted) return;
+
+      if (storeErr) {
+        setLoading(false);
+        setMsg(storeErr.message);
+        return;
+      }
+
+      if (!store?.id) {
+        setLoading(false);
+        setMsg("Loja não encontrada.");
+        return;
+      }
+
+      setStoreId(store.id);
+
+      const { data: staffRows, error: stErr } = await supabase
+        .from("staff")
+        .select("id,name")
+        .eq("store_id", store.id)
+        .order("created_at", { ascending: true });
+
+      if (!mounted) return;
+
+      if (stErr) {
+        setLoading(false);
+        setMsg(stErr.message);
+        return;
+      }
+
+      setStaff((staffRows ?? []) as Staff[]);
+
+      const { data: blockRows, error: bErr } = await supabase
+        .from("availability_blocks")
+        .select("id,staff_id,start_at,end_at,reason")
+        .eq("store_id", store.id)
+        .order("start_at", { ascending: true });
+
+      if (!mounted) return;
+
+      if (bErr) {
+        setLoading(false);
+        setMsg(bErr.message);
+        return;
+      }
+
+      setBlocks((blockRows ?? []) as Block[]);
+      setLoading(false);
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [router]);
 
   async function addBlock() {
     setMsg(null);
@@ -106,30 +182,33 @@ export default function BlocksPage() {
       return;
     }
 
-    const startDate = new Date(startAt);
-    const endDate = new Date(endAt);
+    const start = new Date(startAt);
+    const end = new Date(endAt);
 
-    if (!Number.isFinite(startDate.getTime()) || !Number.isFinite(endDate.getTime())) {
-      setMsg("Datas inválidas.");
+    if (!(start instanceof Date) || isNaN(start.getTime())) {
+      setMsg("Data/hora de início inválida.");
+      return;
+    }
+    if (!(end instanceof Date) || isNaN(end.getTime())) {
+      setMsg("Data/hora de fim inválida.");
+      return;
+    }
+    if (start >= end) {
+      setMsg("O início tem de ser antes do fim.");
       return;
     }
 
-    if (endDate <= startDate) {
-      setMsg("O fim tem de ser depois do início.");
-      return;
-    }
-
-    // datetime-local -> ISO (interpreta como local do browser; ok para MVP)
-    const startIso = startDate.toISOString();
-    const endIso = endDate.toISOString();
+    setAdding(true);
 
     const { error } = await supabase.from("availability_blocks").insert({
       store_id: storeId,
       staff_id: staffId || null,
-      start_at: startIso,
-      end_at: endIso,
+      start_at: start.toISOString(),
+      end_at: end.toISOString(),
       reason: reason.trim() || null,
     });
+
+    setAdding(false);
 
     if (error) {
       setMsg(error.message);
@@ -139,7 +218,6 @@ export default function BlocksPage() {
     setStartAt("");
     setEndAt("");
     setReason("");
-
     await loadAll();
   }
 
@@ -149,19 +227,6 @@ export default function BlocksPage() {
     if (error) return setMsg(error.message);
     setBlocks((prev) => prev.filter((b) => b.id !== id));
   }
-
-  useEffect(() => {
-        mountedRef.current = true;
-
-        (async () => {
-            await loadAll();
-        })();
-
-        return () => {
-            mountedRef.current = false;
-        };
-    }, [loadAll]);
-
 
   return (
     <div className="p-6">
@@ -229,12 +294,22 @@ export default function BlocksPage() {
               </div>
             ) : null}
 
-            <button
-              onClick={addBlock}
-              className="mt-4 w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white"
-            >
-              Criar bloqueio
-            </button>
+            <div className="mt-4 flex gap-2">
+              <button
+                onClick={() => void loadAll()}
+                className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold hover:bg-gray-50"
+              >
+                Atualizar
+              </button>
+
+              <button
+                onClick={addBlock}
+                disabled={adding}
+                className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {adding ? "A criar..." : "Criar bloqueio"}
+              </button>
+            </div>
           </div>
 
           <div className="mt-6">
@@ -246,38 +321,32 @@ export default function BlocksPage() {
               </div>
             ) : (
               <div className="mt-3 space-y-2">
-                {blocks.map((b) => {
-                  const who = b.staff_id
-                    ? staffNameById.get(b.staff_id) ?? "Profissional"
-                    : "Global da loja";
-
-                  return (
-                    <div
-                      key={b.id}
-                      className="flex items-center justify-between rounded-xl border border-gray-200 bg-white px-4 py-3"
-                    >
-                      <div>
-                        <div className="text-sm font-semibold text-gray-900">
-                          {who}{" "}
-                          <span className="text-xs font-normal text-gray-500">
-                            {b.reason ? `· ${b.reason}` : ""}
-                          </span>
-                        </div>
-                        <div className="text-xs text-gray-600">
-                          {new Date(b.start_at).toLocaleString("pt-PT")} →{" "}
-                          {new Date(b.end_at).toLocaleString("pt-PT")}
-                        </div>
+                {blocks.map((b) => (
+                  <div
+                    key={b.id}
+                    className="flex items-center justify-between rounded-xl border border-gray-200 bg-white px-4 py-3"
+                  >
+                    <div>
+                      <div className="text-sm font-semibold text-gray-900">
+                        {b.staff_id ? "Profissional" : "Global"}{" "}
+                        <span className="text-xs font-normal text-gray-500">
+                          {b.reason ? `· ${b.reason}` : ""}
+                        </span>
                       </div>
-
-                      <button
-                        onClick={() => removeBlock(b.id)}
-                        className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
-                      >
-                        Remover
-                      </button>
+                      <div className="text-xs text-gray-600">
+                        {new Date(b.start_at).toLocaleString("pt-PT")} →{" "}
+                        {new Date(b.end_at).toLocaleString("pt-PT")}
+                      </div>
                     </div>
-                  );
-                })}
+
+                    <button
+                      onClick={() => removeBlock(b.id)}
+                      className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-900 hover:bg-gray-50"
+                    >
+                      Remover
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
           </div>
