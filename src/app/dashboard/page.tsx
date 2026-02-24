@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import AppShell from "@/components/AppShell";
 import { supabase } from "@/lib/supabaseClient";
@@ -22,51 +22,53 @@ export default function DashboardPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [store, setStore] = useState<StoreRow | null>(null);
 
-  const load = useCallback(async () => {
-    setMsg(null);
-    setLoading(true);
-
-    const { data: authData, error: authErr } = await supabase.auth.getUser();
-    const user = authData?.user;
-
-    if (authErr || !user) {
-      setLoading(false);
-      router.push("/login");
-      return;
-    }
-
-    const { data: storeRow, error: storeErr } = await supabase
-      .from("stores")
-      .select("id,name,slug")
-      .eq("owner_id", user.id)
-      .maybeSingle<StoreRow>();
-
-    if (storeErr) {
-      setLoading(false);
-      setMsg(storeErr.message);
-      return;
-    }
-
-    if (!storeRow) {
-      setLoading(false);
-      setMsg("Ainda não tens loja. Vai ao onboarding.");
-      setStore(null);
-      return;
-    }
-
-    setStore(storeRow);
-    setLoading(false);
-  }, [router]);
-
-  async function reload() {
-    await load();
-  }
-
   useEffect(() => {
-    // Este lint é agressivo para “fetch on mount”. Aqui faz sentido.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
+    let mounted = true;
+
+    (async () => {
+      setMsg(null);
+      setLoading(true);
+
+      const { data: authData, error: authErr } = await supabase.auth.getUser();
+      const user = authData?.user;
+
+      if (!mounted) return;
+
+      if (authErr || !user) {
+        setLoading(false);
+        router.push("/login");
+        return;
+      }
+
+      const { data: storeRow, error: storeErr } = await supabase
+        .from("stores")
+        .select("id,name,slug")
+        .eq("owner_id", user.id)
+        .maybeSingle<StoreRow>();
+
+      if (!mounted) return;
+
+      if (storeErr) {
+        setLoading(false);
+        setMsg(storeErr.message);
+        return;
+      }
+
+      if (!storeRow) {
+        setLoading(false);
+        setMsg("Ainda não tens loja. Vai ao onboarding.");
+        setStore(null);
+        return;
+      }
+
+      setStore(storeRow);
+      setLoading(false);
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [router]);
 
   const publicUrl = store?.slug ? buildPublicUrl(store.slug) : "";
 
@@ -100,42 +102,29 @@ export default function DashboardPage() {
               </div>
             ) : null}
 
-            <div className="flex items-center justify-end gap-2">
-              <button
-                onClick={reload}
-                className="rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold hover:bg-gray-50"
-              >
-                Atualizar
-              </button>
-
-              <button
-                onClick={() => router.push("/onboarding?step=1")}
-                className="rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
-              >
-                Ver onboarding
-              </button>
-            </div>
-
             <div className="mt-6 grid gap-4 lg:grid-cols-3">
+              {/* CARD 1 */}
               <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-sm font-semibold text-gray-900">Trial</div>
-                <div className="mt-1 text-sm text-gray-600">Estado do plano</div>
+                <div className="text-sm font-semibold text-gray-900">Loja</div>
+                <div className="mt-1 text-sm text-gray-600">Informação principal</div>
 
                 <div className="mt-4 text-sm text-gray-700">
-                  Loja: <span className="font-semibold">{store?.name}</span>
+                  Nome: <span className="font-semibold">{store?.name}</span>
                 </div>
 
-                <div className="mt-3 text-3xl font-semibold text-gray-900">14 dias</div>
-                <div className="mt-1 text-xs text-gray-500">
-                  (Cálculo de dias restantes vem depois.)
+                <div className="mt-2 text-sm text-gray-700">
+                  Slug: <span className="font-semibold">{store?.slug}</span>
                 </div>
               </div>
 
+              {/* CARD 2 */}
               <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-sm font-semibold text-gray-900">Link da sua loja</div>
-                <div className="mt-1 text-sm text-gray-600">Partilhe com os seus clientes</div>
+                <div className="text-sm font-semibold text-gray-900">Link público</div>
+                <div className="mt-1 text-sm text-gray-600">
+                  Partilhe com os seus clientes
+                </div>
 
-                <div className="mt-4 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm">
+                <div className="mt-4 rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm break-all">
                   {publicUrl}
                 </div>
 
@@ -148,29 +137,33 @@ export default function DashboardPage() {
                   </button>
                   <button
                     onClick={() => window.open(publicUrl, "_blank")}
-                    disabled={!publicUrl}
-                    className="w-full rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-60"
+                    className="w-full rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
                   >
                     Abrir
                   </button>
                 </div>
               </div>
 
+              {/* CARD 3 – AÇÕES RÁPIDAS */}
               <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-sm font-semibold text-gray-900">Ações rápidas</div>
-                <div className="mt-1 text-sm text-gray-600">Configuração e gestão</div>
+                <div className="text-sm font-semibold text-gray-900">
+                  Ações rápidas
+                </div>
+                <div className="mt-1 text-sm text-gray-600">
+                  Gestão de marcações
+                </div>
 
                 <div className="mt-4 grid gap-2">
                   <button
-                    onClick={() => router.push("/onboarding?step=1")}
-                    className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold hover:bg-gray-50"
+                    onClick={() => router.push("/dashboard/appointments")}
+                    className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white hover:opacity-90"
                   >
-                    Editar onboarding
+                    Ver marcações
                   </button>
 
                   <button
                     onClick={() => router.push("/dashboard/create-booking")}
-                    className="w-full rounded-xl bg-black px-4 py-3 text-sm font-semibold text-white hover:opacity-90"
+                    className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold hover:bg-gray-50"
                   >
                     Criar marcação (telefone)
                   </button>
@@ -180,6 +173,13 @@ export default function DashboardPage() {
                     className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold hover:bg-gray-50"
                   >
                     Bloquear horários
+                  </button>
+
+                  <button
+                    onClick={() => router.push("/onboarding?step=1")}
+                    className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-semibold hover:bg-gray-50"
+                  >
+                    Editar onboarding
                   </button>
                 </div>
               </div>
